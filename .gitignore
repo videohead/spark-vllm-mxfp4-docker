@@ -1,0 +1,57 @@
+# Cache directories
+.cache/
+
+# Local runtime config (contains secrets such as HUGGING_FACE_HUB_TOKEN)
+.env
+
+# Model download virtualenv
+.venv-download/
+
+# Test logs (generated per run)
+test_logs/
+
+# Test output artifacts
+# Note: Most harness outputs go under test_logs/ (already ignored above)
+# This catches any loose test artifacts in root or test_outputs/
+test_outputs/
+
+# Profile outputs
+profile_outputs/
+profiles/
+
+# Nsight profiling files
+*.nsys-rep
+*.qdrep
+*.qdstrm
+*.sqlite
+*.nvvp
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Benchmark results (local test runs)
+results/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log.tmp

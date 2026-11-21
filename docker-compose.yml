@@ -1,0 +1,155 @@
+# =============================================================================
+# Docker Compose for GPT-OSS-120B with MXFP4 on DGX Spark (SM121/GB10)
+# =============================================================================
+#
+# Achieves 72 tok/s decode with TP=2 RDMA, 60 tok/s with TP=1.
+#
+# Usage:
+#   docker compose build                 # Build the image
+#   docker compose up -d                 # Start the service
+#   docker compose logs -f               # View logs
+#   docker compose down                  # Stop the service
+#
+# Benchmark:
+#   docker compose exec vllm-mxfp4 llama-benchy \
+#       --base-url http://localhost:8000/v1 \
+#       --model gpt-oss-120b \
+#       --tokenizer openai/gpt-oss-120b \
+#       --pp 2048 --tg 32 128
+#
+# =============================================================================
+
+services:
+  vllm-mxfp4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: ${BUILD_JOBS:-16}
+    image: ${IMAGE:-vllm-mxfp4-spark:latest}
+    container_name: ${CONTAINER_NAME:-vllm-mxfp4}
+    # Do not auto-restart; the service is started explicitly.
+    restart: ${RESTART_POLICY:-no}
+    
+    # Use host networking for multi-node Ray/NCCL
+    network_mode: host
+    
+    # GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # No port mapping needed with network_mode: host
+    # All ports are directly accessible on host
+    
+    # Shared memory for CUDA IPC
+    ipc: host
+    
+    # RDMA device access for NCCL IB/RoCE transport (enables TP=2 at 72 tok/s)
+    devices:
+      - /dev/infiniband:/dev/infiniband
+    
+    # IPC_LOCK required for RDMA memory pinning
+    cap_add:
+      - IPC_LOCK
+    
+    # Resource limits
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    
+    # Persistent volumes
+    volumes:
+      # Model checkpoints live in /opt/ComfyUI/models/llms, mounted read-only.
+      - ${MODEL_HOST_ROOT:-/opt/ComfyUI/models/llms}:${MODEL_CONTAINER_ROOT:-/models}:ro
+      # FlashInfer JIT cache (speeds up startup after first run)
+      - ./.cache/flashinfer:/root/.cache/flashinfer
+      # vLLM cache
+      - ./.cache/vllm:/root/.cache/vllm
+      # Ccache for rebuilds
+      - ./.cache/ccache:/root/.ccache
+    
+    # Environment configuration
+    environment:
+      # FlashInfer settings
+      - FLASHINFER_LOGLEVEL=0
+      - FLASHINFER_JIT_VERBOSE=0
+      - FLASHINFER_NVCC_THREADS=4
+      
+      # Tiktoken encodings
+      - TIKTOKEN_ENCODINGS_BASE=${TIKTOKEN_ENCODINGS_BASE:-/workspace/tiktoken_encodings}
+      
+      # NCCL settings for multi-node TP=2 (uncomment and adjust for your network)
+      # - NCCL_SOCKET_IFNAME=enp1s0f1np1  # Your network interface
+      # - NCCL_IB_DISABLE=0               # Enable InfiniBand/RoCE
+      # - NCCL_IB_HCA=rocep1s0f1          # Your RoCE device (from ibdev2netdev)
+      
+      # HuggingFace token for gated models (local path needs none; harmless if empty)
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    
+    # vLLM server command with optimized settings. Serves the local checkpoint
+    # from the read-only mount instead of pulling from HuggingFace at runtime.
+    command: >
+      vllm serve ${MODEL_PATH:-/models/gpt-oss-120b}
+        --host 0.0.0.0
+        --port ${PORT:-8000}
+        --served-model-name ${SERVED_MODEL_NAME:-gpt-oss-120b}
+        --quantization mxfp4
+        --mxfp4-backend CUTLASS
+        --mxfp4-layers moe,qkv,o,lm_head
+        --attention-backend FLASHINFER
+        --kv-cache-dtype fp8
+        --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-1}
+        --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.70}
+        --max-model-len ${MAX_MODEL_LEN:-131072}
+        --max-num-seqs ${MAX_NUM_SEQS:-2}
+        --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS:-8192}
+        --enable-prefix-caching
+        --load-format fastsafetensors
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: ${HEALTH_TIMEOUT_S:-300}s
+
+# =============================================================================
+# Alternative configurations
+# =============================================================================
+
+  # Development mode - mounts local repos for live editing
+  vllm-dev:
+    extends:
+      service: vllm-mxfp4
+    container_name: vllm-dev
+    volumes:
+      - ${MODEL_HOST_ROOT:-/opt/ComfyUI/models/llms}:${MODEL_CONTAINER_ROOT:-/models}:ro
+      - ./.cache/flashinfer:/root/.cache/flashinfer
+      - ./.cache/vllm:/root/.cache/vllm
+      - ./.cache/ccache:/root/.ccache
+      # Mount local repos for development
+      - ~/projects/vllm:/workspace/vllm
+      - ~/projects/flashinfer:/workspace/flashinfer
+    environment:
+      - PYTHONPATH=/workspace/flashinfer:/workspace/vllm
+      - VLLM_MXFP4_BACKEND=CUTLASS
+      - VLLM_ATTENTION_BACKEND=FLASHINFER
+      - FLASHINFER_LOGLEVEL=0
+      - FLASHINFER_JIT_VERBOSE=0
+      - FLASHINFER_NVCC_THREADS=4
+      - TIKTOKEN_ENCODINGS_BASE=${TIKTOKEN_ENCODINGS_BASE:-/workspace/tiktoken_encodings}
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    # Override command to just start bash for development
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+    profiles:
+      - dev
